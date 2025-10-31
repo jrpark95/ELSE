@@ -1,0 +1,729 @@
+#!/usr/bin/env python3
+"""
+VTK particle distribution visualization and GIF animation tool.
+
+Dependencies:
+    - pyvista: VTK file reading and processing
+    - numpy: Array operations
+    - matplotlib: Figure creation
+    - cartopy: Geographic map projections
+    - scipy.ndimage: Gaussian smoothing for heatmaps
+    - imageio: GIF animation creation
+    - datetime: Timestamp handling
+
+Conda environment:
+    conda activate ldm-viz
+    (Includes all required packages: pyvista, matplotlib, cartopy, scipy, imageio)
+
+Input files:
+    - output/plot_vtk_prior/*.vtk: Single simulation particle snapshots
+    - output/plot_vtk_ens/*.vtk: Ensemble simulation particle snapshots
+
+Output:
+    - output/results/particle_distribution_prior.gif
+    - output/results/particle_distribution_ensemble.gif
+    - Individual PNG frames (if --save-frames specified)
+
+Usage:
+    python3 util/visualize_vtk.py              # Auto-detect and process all VTK files
+    python3 util/visualize_vtk.py --mode prior --start 1 --end 100
+    python3 util/visualize_vtk.py --single output/plot_vtk_prior/plot_00100.vtk
+"""
+
+import numpy as np
+import pyvista as pv
+import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
+import cartopy.crs as ccrs
+import cartopy.feature as cfeature
+from cartopy.mpl.gridliner import LONGITUDE_FORMATTER, LATITUDE_FORMATTER
+from scipy.ndimage import gaussian_filter
+import io
+from PIL import Image
+import imageio.v2 as imageio
+import os
+import datetime
+import re
+import argparse
+import sys
+
+# Default simulation parameters
+# Note: These should ideally be read from config files, but we use defaults here
+DEFAULT_BASE_TIME = datetime.datetime(2011, 3, 14, 0, 0, 0)
+DEFAULT_DT = 100  # seconds per timestep
+
+# Default region extent for visualization (can be overridden)
+# Format: [lon_min, lon_max, lat_min, lat_max]
+DEFAULT_REGION_EXTENT = [136, 150, 32, 42]  # Japan region (Fukushima area)
+
+
+def plot_particle_distribution(vtk_filename,
+                               region_extent=None,
+                               bins=(400, 400),
+                               use_log_scale=True,
+                               base_time=None,
+                               dt=None,
+                               sigma=2.0):
+    """
+    Generate a geographic plot of particle distribution from VTK file.
+
+    Args:
+        vtk_filename: Path to VTK file
+        region_extent: [lon_min, lon_max, lat_min, lat_max] for plot bounds
+        bins: (nx, ny) histogram bins for particle density
+        use_log_scale: Use logarithmic color scale if True
+        base_time: Base simulation time (datetime object)
+        dt: Time step duration in seconds
+
+    Returns:
+        matplotlib Figure object or None if failed
+    """
+    try:
+        mesh = pv.read(vtk_filename)
+    except Exception as e:
+        print(f"[Error] Failed to read {vtk_filename}: {e}")
+        return None
+
+    points = mesh.points
+
+    if points is None or points.size == 0:
+        print(f"[Skip] {vtk_filename}: No point data.")
+        return None
+
+    # Filter: remove NaN/Inf (no longitude restriction - support global domain)
+    finite_mask = np.isfinite(points).all(axis=1)
+    points = points[finite_mask]
+
+    if points.size == 0:
+        print(f"[Skip] {vtk_filename}: No valid points after filtering.")
+        return None
+
+    lons = points[:, 0]
+    lats = points[:, 1]
+
+    # Additional safety: check for NaN/Inf
+    valid_coords = np.isfinite(lons) & np.isfinite(lats)
+    lons = lons[valid_coords]
+    lats = lats[valid_coords]
+
+    if len(lons) == 0 or len(lats) == 0:
+        print(f"[Skip] {vtk_filename}: No valid lat/lon values.")
+        return None
+
+    # Set visualization region based on actual particle positions
+    if region_extent is None:
+        # Use actual particle extent with a small margin
+        lon_min, lon_max = np.min(lons), np.max(lons)
+        lat_min, lat_max = np.min(lats), np.max(lats)
+
+        # Add 5% margin on each side
+        lon_margin = (lon_max - lon_min) * 0.05
+        lat_margin = (lat_max - lat_min) * 0.05
+        lon_min -= lon_margin
+        lon_max += lon_margin
+        lat_min -= lat_margin
+        lat_max += lat_margin
+
+        # Make the extent square (equal width and height)
+        lon_range = lon_max - lon_min
+        lat_range = lat_max - lat_min
+
+        if lon_range > lat_range:
+            # Expand latitude to match longitude
+            lat_center = (lat_min + lat_max) / 2
+            lat_min = lat_center - lon_range / 2
+            lat_max = lat_center + lon_range / 2
+        else:
+            # Expand longitude to match latitude
+            lon_center = (lon_min + lon_max) / 2
+            lon_min = lon_center - lat_range / 2
+            lon_max = lon_center + lat_range / 2
+    else:
+        lon_min, lon_max, lat_min, lat_max = region_extent
+
+    try:
+        H, lon_edges, lat_edges = np.histogram2d(
+            lons, lats, bins=bins, range=[[lon_min, lon_max], [lat_min, lat_max]]
+        )
+    except ValueError as e:
+        print(f"[Skip] {vtk_filename}: histogram2d error - {e}")
+        return None
+
+    lon_centers = (lon_edges[:-1] + lon_edges[1:]) / 2
+    lat_centers = (lat_edges[:-1] + lat_edges[1:]) / 2
+    Lon, Lat = np.meshgrid(lon_centers, lat_centers)
+
+    # Apply Gaussian smoothing for smoother contours
+    if sigma > 0:
+        H = gaussian_filter(H, sigma=sigma)
+
+    # Start plotting with square aspect ratio
+    fig, ax = plt.subplots(figsize=(12, 12), subplot_kw={'projection': ccrs.PlateCarree()})
+
+    # Set extent based on particle distribution (or user-specified region)
+    ax.set_extent([lon_min, lon_max, lat_min, lat_max], crs=ccrs.PlateCarree())
+
+    ax.add_feature(cfeature.COASTLINE, linewidth=1)
+    ax.add_feature(cfeature.BORDERS, linestyle=':')
+    ax.add_feature(cfeature.LAND, facecolor="lightgray")
+    ax.add_feature(cfeature.STATES, edgecolor="black", facecolor="none")
+    ax.add_feature(cfeature.LAKES, facecolor="lightblue")
+    ax.add_feature(cfeature.RIVERS, linewidth=0.5, color="blue")
+
+    gl = ax.gridlines(draw_labels=True, linestyle="--", linewidth=0.5, color="gray")
+    gl.xformatter = LONGITUDE_FORMATTER
+    gl.yformatter = LATITUDE_FORMATTER
+    gl.xlabel_style = {"size": 10, "color": "black"}
+    gl.ylabel_style = {"size": 10, "color": "black"}
+    gl.right_labels = False
+    gl.top_labels = False
+
+    # Custom colormap (same as original)
+    colors = [
+        "#fffffc", "#c0e9fc", "#83c4f1", "#5099cf", "#49a181",
+        "#6bbc51", "#69bd50", "#d3e158", "#feaf43", "#f96127",
+        "#e1342a", "#9f2b2f", "#891a19"
+    ]
+    cmap = mcolors.ListedColormap(colors)
+
+    # Handle case where H.max() is very small or zero
+    if H.max() < 1e-10:
+        print(f"[Warning] {vtk_filename}: All histogram values are near zero or empty.")
+        boundaries = np.linspace(0, 1, len(colors) + 1)
+    elif use_log_scale and H.max() > 0.1:
+        # Use logarithmic scale heavily biased toward showing low concentrations in light blue
+        h_nonzero = H[H > 0]
+        if len(h_nonzero) > 0:
+            min_val = max(np.percentile(h_nonzero, 1), 0.001)
+            max_val = H.max()
+
+            # Use 90th percentile as the upper anchor to push reds to only the highest concentrations
+            # This means only top 10% of non-zero values will be in warm colors (yellow/red)
+            p90_val = np.percentile(h_nonzero, 90)
+
+            # Create a two-tier log scale:
+            # - Lower tier (min to p90): 70% of color range -> more light blue/cyan
+            # - Upper tier (p90 to max): 30% of color range -> reserved for high concentrations
+            n_colors_lower = int(len(colors) * 0.7)
+            n_colors_upper = len(colors) - n_colors_lower
+
+            if p90_val > min_val * 2:
+                # Lower range: detailed color gradation for low concentrations
+                boundaries_lower = np.logspace(np.log10(min_val), np.log10(p90_val), n_colors_lower + 1)
+                # Upper range: compressed for high concentrations
+                boundaries_upper = np.logspace(np.log10(p90_val), np.log10(max_val), n_colors_upper + 1)[1:]
+                boundaries = np.concatenate([boundaries_lower, boundaries_upper])
+            else:
+                # Fallback to simple log scale
+                boundaries = np.logspace(np.log10(min_val), np.log10(max_val), len(colors) + 1)
+        else:
+            boundaries = np.linspace(0, H.max(), len(colors) + 1)
+    else:
+        # Use linear scale for very sparse data
+        boundaries = np.linspace(0, H.max(), len(colors) + 1)
+
+    # Ensure boundaries are strictly increasing
+    if len(np.unique(boundaries)) < len(boundaries):
+        print(f"[Warning] {vtk_filename}: Boundaries not unique, using linear scale.")
+        boundaries = np.linspace(H.min(), H.max() + 1e-10, len(colors) + 1)
+
+    norm = mcolors.BoundaryNorm(boundaries, ncolors=len(colors), clip=True)
+
+    contour = ax.contourf(
+        Lon, Lat, H.T,
+        levels=boundaries,
+        cmap=cmap,
+        norm=norm,
+        transform=ccrs.PlateCarree()
+    )
+
+    cbar = plt.colorbar(contour, ax=ax, orientation='vertical', pad=0.02, shrink=0.8)
+    cbar.set_label("Particle Count", fontsize=16)
+
+    # Extract timestamp from filename
+    # Supports patterns: plot_00001.vtk, Cs-137_00015.vtk, etc.
+    match = re.search(r'_(\d{5})\.vtk$', vtk_filename)
+    if match:
+        time_step_idx = int(match.group(1))
+
+        # Use provided base_time and dt, or defaults
+        if base_time is None:
+            base_time = DEFAULT_BASE_TIME
+        if dt is None:
+            dt = DEFAULT_DT
+
+        time_seconds = time_step_idx * dt
+        sim_time = base_time + datetime.timedelta(seconds=time_seconds)
+        time_str = sim_time.strftime("%B %d, %Y, %H:%M UTC")
+        particle_info = f" | Particles: {len(lons):,}"
+    else:
+        time_str = "Unknown Time"
+        particle_info = f" | Particles: {len(lons):,}"
+
+    ax.set_title(f"LDM-EKI Simulation - {time_str}{particle_info}", fontsize=18, weight='bold')
+    plt.tight_layout()
+    return fig
+
+
+def create_dual_gif_from_vtk_series(vtk_directory,
+                                    filename_pattern="plot_{:05d}.vtk",
+                                    start=1,
+                                    end=100,
+                                    step=1,
+                                    output_gif_wide="particle_distribution_wide.gif",
+                                    output_gif_zoom="particle_distribution_zoom.gif",
+                                    region_extent_wide=None,
+                                    region_extent_zoom=None,
+                                    base_time=None,
+                                    dt=None,
+                                    **plot_kwargs):
+    """
+    Create TWO animated GIFs from series of VTK files in a single pass (efficient).
+
+    Args:
+        vtk_directory: Directory containing VTK files
+        filename_pattern: Pattern for VTK filenames (e.g., "plot_{:05d}.vtk")
+        start: Starting timestep index
+        end: Ending timestep index
+        step: Step size for timesteps
+        output_gif_wide: Output GIF filename for wide view
+        output_gif_zoom: Output GIF filename for zoomed view
+        region_extent_wide: Geographic extent for wide view plots
+        region_extent_zoom: Geographic extent for zoomed view plots
+        base_time: Base simulation time
+        dt: Time step duration in seconds
+        **plot_kwargs: Additional arguments passed to plot_particle_distribution
+    """
+    images_wide = []
+    images_zoom = []
+
+    print(f"\n{'='*70}")
+    print(f"Generating DUAL GIFs (Wide + Zoom) from VTK files:")
+    print(f"  Directory: {vtk_directory}")
+    print(f"  Range: {start} to {end} (step {step})")
+    print(f"  Output Wide: {output_gif_wide}")
+    print(f"  Output Zoom: {output_gif_zoom}")
+    print(f"{'='*70}\n")
+
+    # If region_extent_wide is not specified, compute maximum extent from all VTK files
+    if region_extent_wide is None:
+        print("[Info] Computing maximum extent from all VTK files...")
+        lon_min_global, lon_max_global = float('inf'), float('-inf')
+        lat_min_global, lat_max_global = float('inf'), float('-inf')
+
+        for t in range(start, end + 1, step):
+            vtk_filename = os.path.join(vtk_directory, filename_pattern.format(t))
+            if not os.path.exists(vtk_filename):
+                continue
+
+            try:
+                mesh = pv.read(vtk_filename)
+                points = mesh.points
+                if points is None or points.size == 0:
+                    continue
+
+                # Filter valid points (remove NaN/Inf, support global domain)
+                finite_mask = np.isfinite(points).all(axis=1)
+                points = points[finite_mask]
+
+                if points.size == 0:
+                    continue
+
+                lons = points[:, 0]
+                lats = points[:, 1]
+                valid_coords = np.isfinite(lons) & np.isfinite(lats)
+                lons = lons[valid_coords]
+                lats = lats[valid_coords]
+
+                if len(lons) > 0 and len(lats) > 0:
+                    lon_min_global = min(lon_min_global, np.min(lons))
+                    lon_max_global = max(lon_max_global, np.max(lons))
+                    lat_min_global = min(lat_min_global, np.min(lats))
+                    lat_max_global = max(lat_max_global, np.max(lats))
+
+            except Exception as e:
+                continue
+
+        if lon_min_global != float('inf'):
+            # Add 5% margin
+            lon_margin = (lon_max_global - lon_min_global) * 0.05
+            lat_margin = (lat_max_global - lat_min_global) * 0.05
+            lon_min_global -= lon_margin
+            lon_max_global += lon_margin
+            lat_min_global -= lat_margin
+            lat_max_global += lat_margin
+
+            # Make the extent square (equal width and height)
+            lon_range = lon_max_global - lon_min_global
+            lat_range = lat_max_global - lat_min_global
+
+            if lon_range > lat_range:
+                # Expand latitude to match longitude
+                lat_center = (lat_min_global + lat_max_global) / 2
+                lat_min_global = lat_center - lon_range / 2
+                lat_max_global = lat_center + lon_range / 2
+            else:
+                # Expand longitude to match latitude
+                lon_center = (lon_min_global + lon_max_global) / 2
+                lon_min_global = lon_center - lat_range / 2
+                lon_max_global = lon_center + lat_range / 2
+
+            region_extent_wide = [lon_min_global, lon_max_global, lat_min_global, lat_max_global]
+            print(f"[Info] Wide extent (square): lon=[{lon_min_global:.2f}, {lon_max_global:.2f}], "
+                  f"lat=[{lat_min_global:.2f}, {lat_max_global:.2f}]")
+            print(f"[Info] Extent size: {lon_max_global - lon_min_global:.2f}° × {lat_max_global - lat_min_global:.2f}°")
+        else:
+            print("[Warning] Could not determine extent from VTK files, using default.")
+            region_extent_wide = DEFAULT_REGION_EXTENT
+
+    print(f"[Info] Using fixed wide extent: {region_extent_wide}")
+    print(f"[Info] Using fixed zoom extent: {region_extent_zoom}\n")
+
+    # Main loop: generate BOTH figures for each timestep
+    for t in range(start, end + 1, step):
+        vtk_filename = os.path.join(vtk_directory, filename_pattern.format(t))
+
+        if not os.path.exists(vtk_filename):
+            print(f"[Skip] File not found: {vtk_filename}")
+            continue
+
+        print(f"Processing [{t:05d}]: {os.path.basename(vtk_filename)}")
+
+        # Generate WIDE view
+        fig_wide = plot_particle_distribution(
+            vtk_filename,
+            region_extent=region_extent_wide,
+            base_time=base_time,
+            dt=dt,
+            **plot_kwargs
+        )
+
+        if fig_wide is not None:
+            buf = io.BytesIO()
+            fig_wide.savefig(buf, format='png', dpi=150, bbox_inches='tight')
+            buf.seek(0)
+            images_wide.append(Image.open(buf).convert("RGB"))
+            plt.close(fig_wide)
+
+        # Generate ZOOM view
+        if region_extent_zoom is not None:
+            fig_zoom = plot_particle_distribution(
+                vtk_filename,
+                region_extent=region_extent_zoom,
+                base_time=base_time,
+                dt=dt,
+                **plot_kwargs
+            )
+
+            if fig_zoom is not None:
+                buf = io.BytesIO()
+                fig_zoom.savefig(buf, format='png', dpi=150, bbox_inches='tight')
+                buf.seek(0)
+                images_zoom.append(Image.open(buf).convert("RGB"))
+                plt.close(fig_zoom)
+
+    # Save WIDE GIF
+    if images_wide:
+        print(f"\n[Success] Saving WIDE GIF with {len(images_wide)} frames...")
+        images_wide[0].save(
+            output_gif_wide,
+            save_all=True,
+            append_images=images_wide[1:],
+            duration=300,  # 300ms per frame
+            loop=0
+        )
+        print(f"[Success] Wide GIF saved as {output_gif_wide}")
+        print(f"          File size: {os.path.getsize(output_gif_wide) / 1024 / 1024:.2f} MB")
+    else:
+        print("[Warning] No valid frames for wide GIF.")
+
+    # Save ZOOM GIF
+    if images_zoom:
+        print(f"\n[Success] Saving ZOOM GIF with {len(images_zoom)} frames...")
+        images_zoom[0].save(
+            output_gif_zoom,
+            save_all=True,
+            append_images=images_zoom[1:],
+            duration=300,  # 300ms per frame
+            loop=0
+        )
+        print(f"[Success] Zoom GIF saved as {output_gif_zoom}")
+        print(f"          File size: {os.path.getsize(output_gif_zoom) / 1024 / 1024:.2f} MB")
+    else:
+        print("[Warning] No valid frames for zoom GIF.")
+
+
+def main():
+    """Main entry point with command-line argument parsing."""
+    parser = argparse.ArgumentParser(
+        description="Generate geographic visualizations from VTK files",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Generate GIF from prior simulation (timesteps 1-100, every 5 steps)
+  python3 util/visualize_vtk.py --mode prior --start 1 --end 100 --step 5
+
+  # Generate GIF from ensemble simulation
+  python3 util/visualize_vtk.py --mode ensemble --start 1 --end 50 --step 2
+
+  # Generate single plot from specific VTK file
+  python3 util/visualize_vtk.py --single output/plot_vtk_prior/plot_00050.vtk
+
+  # Custom region extent (lon_min, lon_max, lat_min, lat_max)
+  python3 util/visualize_vtk.py --mode prior --start 1 --end 100 --step 5 \\
+      --extent 135 145 35 40
+
+  # Custom output filename
+  python3 util/visualize_vtk.py --mode prior --start 1 --end 100 --step 5 \\
+      --output my_simulation.gif
+        """
+    )
+
+    # Mode selection
+    mode_group = parser.add_mutually_exclusive_group(required=False)
+    mode_group.add_argument(
+        '--mode',
+        choices=['prior', 'ensemble'],
+        help='Simulation mode: prior (true simulation) or ensemble (default: auto-detect)'
+    )
+    mode_group.add_argument(
+        '--single',
+        metavar='VTK_FILE',
+        help='Generate single plot from specific VTK file'
+    )
+
+    # Time range arguments
+    parser.add_argument(
+        '--start',
+        type=int,
+        default=1,
+        help='Starting timestep index (default: 1)'
+    )
+    parser.add_argument(
+        '--end',
+        type=int,
+        default=100,
+        help='Ending timestep index (default: 100)'
+    )
+    parser.add_argument(
+        '--step',
+        type=int,
+        default=5,
+        help='Step size for timesteps (default: 5)'
+    )
+
+    # Output options
+    parser.add_argument(
+        '--output',
+        metavar='FILENAME',
+        help='Output GIF filename (default: auto-generated based on mode)'
+    )
+    parser.add_argument(
+        '--output-dir',
+        default='output/results',
+        help='Output directory for GIF (default: output/results)'
+    )
+
+    # Visualization options
+    parser.add_argument(
+        '--extent',
+        nargs=4,
+        type=float,
+        metavar=('LON_MIN', 'LON_MAX', 'LAT_MIN', 'LAT_MAX'),
+        help=f'Geographic extent (default: {DEFAULT_REGION_EXTENT})'
+    )
+    parser.add_argument(
+        '--bins',
+        nargs=2,
+        type=int,
+        default=[400, 400],
+        metavar=('NX', 'NY'),
+        help='Histogram bins for particle density (default: 400 400)'
+    )
+    parser.add_argument(
+        '--sigma',
+        type=float,
+        default=0.8,
+        help='Gaussian smoothing sigma for smoother contours (default: 0.8, use 0 to disable)'
+    )
+    parser.add_argument(
+        '--linear-scale',
+        action='store_true',
+        help='Use linear color scale instead of logarithmic'
+    )
+
+    # Time parameters
+    parser.add_argument(
+        '--base-time',
+        metavar='YYYY-MM-DD-HH:MM:SS',
+        help=f'Base simulation time (default: {DEFAULT_BASE_TIME.strftime("%Y-%m-%d %H:%M:%S")})'
+    )
+    parser.add_argument(
+        '--dt',
+        type=int,
+        default=DEFAULT_DT,
+        help=f'Time step duration in seconds (default: {DEFAULT_DT})'
+    )
+
+    args = parser.parse_args()
+
+    # Parse base_time if provided
+    base_time = DEFAULT_BASE_TIME
+    if args.base_time:
+        try:
+            base_time = datetime.datetime.strptime(args.base_time, "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            print(f"[Error] Invalid base time format: {args.base_time}")
+            print("        Expected format: YYYY-MM-DD HH:MM:SS")
+            sys.exit(1)
+
+    # Set region extent (None means auto-detect from particles)
+    region_extent = args.extent if args.extent else None
+
+    # Auto-detect mode if not specified
+    if not args.mode and not args.single:
+        print("[Info] No mode specified, auto-detecting available VTK files...\n")
+
+        # Check which directories exist and have VTK files
+        prior_dir = 'output/plot_vtk_prior'
+        ensemble_dir = 'output/plot_vtk_ens'
+
+        prior_exists = os.path.exists(prior_dir) and len([f for f in os.listdir(prior_dir) if f.endswith('.vtk')]) > 0
+        ensemble_exists = os.path.exists(ensemble_dir) and len([f for f in os.listdir(ensemble_dir) if f.endswith('.vtk')]) > 0
+
+        if prior_exists:
+            args.mode = 'prior'
+            print(f"[Info] Found VTK files in {prior_dir}, using mode: prior")
+        elif ensemble_exists:
+            args.mode = 'ensemble'
+            print(f"[Info] Found VTK files in {ensemble_dir}, using mode: ensemble")
+        else:
+            print("[Error] No VTK files found in output/plot_vtk_prior or output/plot_vtk_ens")
+            print("        Run a simulation first or specify --single with a VTK file path.")
+            sys.exit(1)
+
+    # Handle single plot mode
+    if args.single:
+        if not os.path.exists(args.single):
+            print(f"[Error] File not found: {args.single}")
+            sys.exit(1)
+
+        print(f"Generating single plot from: {args.single}")
+        fig = plot_particle_distribution(
+            args.single,
+            region_extent=region_extent,
+            bins=tuple(args.bins),
+            use_log_scale=not args.linear_scale,
+            base_time=base_time,
+            dt=args.dt,
+            sigma=args.sigma
+        )
+
+        if fig is not None:
+            output_png = args.single.replace('.vtk', '_plot.png')
+            fig.savefig(output_png, dpi=150, bbox_inches='tight')
+            print(f"[Success] Plot saved as {output_png}")
+            plt.show()
+        else:
+            print("[Error] Failed to generate plot")
+            sys.exit(1)
+        return
+
+    # Handle GIF mode
+    if args.mode == 'prior':
+        vtk_directory = 'output/plot_vtk_prior'
+        default_output = 'particle_distribution_prior.gif'
+    else:  # ensemble
+        vtk_directory = 'output/plot_vtk_ens'
+        default_output = 'particle_distribution_ensemble.gif'
+
+    if not os.path.exists(vtk_directory):
+        print(f"[Error] Directory not found: {vtk_directory}")
+        print("        Run a simulation first to generate VTK files.")
+        sys.exit(1)
+
+    # Auto-detect end timestep if default value is used
+    if args.end == 100:  # default value
+        # Find the maximum timestep from existing VTK files
+        vtk_files = [f for f in os.listdir(vtk_directory) if f.endswith('.vtk')]
+        if vtk_files:
+            # Extract timestep numbers from filenames (e.g., plot_00050.vtk -> 50)
+            timesteps = []
+            for f in vtk_files:
+                match = re.search(r'_(\d{5})\.vtk$', f)
+                if match:
+                    timesteps.append(int(match.group(1)))
+
+            if timesteps:
+                detected_end = max(timesteps)
+                print(f"[Info] Auto-detected end timestep: {detected_end} (found {len(timesteps)} VTK files)")
+                args.end = detected_end
+
+    # Prepare output paths
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    # Read source location from source.conf to determine zoom region
+    source_conf_path = 'input/source.conf'
+    zoom_extent = None
+    try:
+        if os.path.exists(source_conf_path):
+            with open(source_conf_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith('#') and not line.startswith('['):
+                        parts = line.split()
+                        if len(parts) >= 2:
+                            try:
+                                src_lon = float(parts[0])
+                                src_lat = float(parts[1])
+                                # Create zoom extent: HEAVY zoom in (5x more than before)
+                                # Make it square
+                                zoom_size = 0.4  # Total 0.4° × 0.4° square (was 2.0, now 5x smaller = 5x zoom)
+                                zoom_extent = [src_lon - zoom_size/2, src_lon + zoom_size/2,
+                                             src_lat - zoom_size/2, src_lat + zoom_size/2]
+                                print(f"\n[Info] Detected source at ({src_lon:.3f}, {src_lat:.3f})")
+                                print(f"[Info] Zoom extent (square {zoom_size}° × {zoom_size}°, ±{zoom_size/2}°): {zoom_extent}")
+                                break
+                            except ValueError:
+                                continue  # Skip lines that can't be parsed as floats
+    except Exception as e:
+        print(f"[Warning] Could not read source location: {e}")
+
+    # Prepare output GIF filenames
+    output_gif_wide = args.output if args.output else default_output
+    if not output_gif_wide.endswith('.gif'):
+        output_gif_wide += '.gif'
+    output_gif_wide = output_gif_wide.replace('.gif', '_wide.gif')
+    output_gif_wide = os.path.join(args.output_dir, output_gif_wide)
+
+    output_gif_zoom = args.output if args.output else default_output
+    if not output_gif_zoom.endswith('.gif'):
+        output_gif_zoom += '.gif'
+    output_gif_zoom = output_gif_zoom.replace('.gif', '_zoom.gif')
+    output_gif_zoom = os.path.join(args.output_dir, output_gif_zoom)
+
+    # Generate BOTH GIFs in a single efficient pass
+    create_dual_gif_from_vtk_series(
+        vtk_directory=vtk_directory,
+        filename_pattern="plot_{:05d}.vtk",
+        start=args.start,
+        end=args.end,
+        step=args.step,
+        output_gif_wide=output_gif_wide,
+        output_gif_zoom=output_gif_zoom,
+        region_extent_wide=region_extent,  # Use user-specified or auto-detect
+        region_extent_zoom=zoom_extent,    # Fixed zoom extent (None if not available)
+        bins=tuple(args.bins),
+        use_log_scale=not args.linear_scale,
+        base_time=base_time,
+        dt=args.dt,
+        sigma=args.sigma
+    )
+
+    print("\n" + "="*70)
+    print("VISUALIZATION COMPLETE")
+    print("="*70)
+
+
+if __name__ == "__main__":
+    main()

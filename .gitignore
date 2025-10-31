@@ -1,0 +1,14 @@
+# VTK files
+*.vtk
+
+# Log files
+*.log
+log/
+
+# Output directory
+output/
+
+# Executables
+else
+ldm-eki
+ldm-receptor-debug
