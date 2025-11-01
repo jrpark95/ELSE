@@ -238,6 +238,7 @@ class Model(object):
         #np.set_printoptions(threshold=np.inf)
         print(f"{Fore.MAGENTA}[ENSEMBLE]{Style.RESET_ALL} Forward model: {tmp_states.shape[0]} states × {tmp_states.shape[1]} members")
 
+
         # IMPORTANT: Delete previous observation files to avoid reading stale data
         import os
         ensemble_obs_config_path = "/dev/shm/ldm_eki_ensemble_obs_config"
@@ -359,27 +360,7 @@ class Model(object):
         self.obs_MDA = np.diag((np.floor(self.obs * 0) + np.ones([len(self.obs)])*self.nreceptor_MDA))
 
     def get_ob(self, time):
-        # FIXED: 물리적으로 올바른 관측 오차 계산
-        # Extract relative error values from diagonal matrices
-        if isinstance(self.obs_err, np.ndarray) and self.obs_err.ndim == 2:
-            relative_error = np.diag(self.obs_err)
-        else:
-            relative_error = self.obs_err
-
-        if isinstance(self.obs_MDA, np.ndarray) and self.obs_MDA.ndim == 2:
-            absolute_error = np.diag(self.obs_MDA)
-        else:
-            absolute_error = self.obs_MDA
-
-        # Calculate observation uncertainty: σ = relative_error × observation + absolute_error
-        obs_std = self.obs * relative_error + absolute_error
-
-        # Variance = σ²
-        obs_variance = obs_std**2
-
-        # Observation error covariance matrix R (diagonal matrix for independent observations)
-        self.obs_err = np.diag(obs_variance)
-
+        self.obs_err = (self.obs * self.obs_err + self.obs_MDA)**2   # [obs_rel_std(rate) * true_obs + obs_abs_std]**2
         return self.obs, self.obs_err
 
     def predict(self, state, time):

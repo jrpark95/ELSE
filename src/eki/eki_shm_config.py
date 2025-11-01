@@ -31,6 +31,32 @@ except ImportError:
     HAS_COLOR = False
 
 
+def read_inflation_from_config():
+    """
+    Read inflation value directly from eki.conf.
+
+    Returns:
+        float: Inflation factor, defaults to 1.0 if not found
+    """
+    try:
+        with open('input/eki.conf', 'r') as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith('#') or not line:
+                    continue
+                if 'EKI_INFLATION' in line:
+                    # Handle both ':' and '=' separators
+                    if ':' in line:
+                        value = line.split(':')[1].strip()
+                    elif '=' in line:
+                        value = line.split('=')[1].strip()
+                    else:
+                        continue
+                    return float(value)
+    except Exception as e:
+        print(f"{Fore.YELLOW}[CONFIG]{Style.RESET_ALL} Could not read inflation from eki.conf: {e}")
+    return 1.0  # Default: no inflation
+
 def load_config_from_shared_memory():
     """
     Load configuration from shared memory.
@@ -60,6 +86,9 @@ def load_config_from_shared_memory():
     else:
         memory_doctor.set_enabled(False)
 
+    # Read inflation value directly from eki.conf (not available in shared memory yet)
+    inflation_value = read_inflation_from_config()
+
     # Construct input_config dictionary (matches original YAML structure)
     input_config = {
         'sample_ctrl': shm_data['ensemble_size'],
@@ -85,6 +114,9 @@ def load_config_from_shared_memory():
         'Localization_weighting_factor': 1.0,
         'Regularization': shm_data['regularization'],
         'REnKF_lambda': shm_data['renkf_lambda'],
+
+        # Ensemble inflation to prevent collapse
+        'EKI_inflation': inflation_value,
 
         # Other options
         'Elimination': 'Off',
@@ -119,8 +151,8 @@ def load_config_from_shared_memory():
         # For now, using placeholder - LDM uses lat/lon from eki.conf, not these XYZ coordinates
         'receptor_position': [[1000.0 * (i+1), 1000.0 * (i+1), 1.0] for i in range(shm_data['num_receptors'])],
 
-        'nreceptor_err': 0.01,  # No additional measurement error (noise in observations)
-        'nreceptor_MDA': 0.0,  # No MDA inflation
+        'nreceptor_err': 0.001,  # 0.1% relative error (realistic for stable convergence)
+        'nreceptor_MDA': 1e-30,  # Absolute error floor
 
         # Source parameters (v1.0: Fixed location mode)
         'Source_location': 'Fixed',  # Always use known source position
@@ -170,6 +202,7 @@ def load_config_from_shared_memory():
     print(f"  Receptors          : {Style.BRIGHT}{input_data['nreceptor']}{Style.RESET_ALL}")
     print(f"  Sources            : {Style.BRIGHT}{input_data['nsource']}{Style.RESET_ALL}")
     print(f"  GPU devices        : {Style.BRIGHT}{input_config['nGPU']}{Style.RESET_ALL}")
+    print(f"  Inflation factor   : {Style.BRIGHT}{input_config['EKI_inflation']:.1f}{Style.RESET_ALL}")
 
     return input_config, input_data
 

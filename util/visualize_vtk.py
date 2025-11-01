@@ -455,6 +455,9 @@ def create_dual_gif_from_vtk_series(vtk_directory,
 
 def main():
     """Main entry point with command-line argument parsing."""
+    import time
+    start_time = time.time()
+
     parser = argparse.ArgumentParser(
         description="Generate geographic visualizations from VTK files",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -674,14 +677,15 @@ Examples:
                         parts = line.split()
                         if len(parts) >= 2:
                             try:
-                                src_lon = float(parts[0])
-                                src_lat = float(parts[1])
+                                # source.conf format: LATITUDE LONGITUDE HEIGHT
+                                src_lat = float(parts[0])  # First value is latitude
+                                src_lon = float(parts[1])  # Second value is longitude
                                 # Create zoom extent: HEAVY zoom in (5x more than before)
                                 # Make it square
                                 zoom_size = 0.4  # Total 0.4° × 0.4° square (was 2.0, now 5x smaller = 5x zoom)
                                 zoom_extent = [src_lon - zoom_size/2, src_lon + zoom_size/2,
                                              src_lat - zoom_size/2, src_lat + zoom_size/2]
-                                print(f"\n[Info] Detected source at ({src_lon:.3f}, {src_lat:.3f})")
+                                print(f"\n[Info] Detected source at ({src_lat:.3f}, {src_lon:.3f})")
                                 print(f"[Info] Zoom extent (square {zoom_size}° × {zoom_size}°, ±{zoom_size/2}°): {zoom_extent}")
                                 break
                             except ValueError:
@@ -720,8 +724,17 @@ Examples:
         sigma=args.sigma
     )
 
+    elapsed_time = time.time() - start_time
+    minutes = int(elapsed_time // 60)
+    seconds = elapsed_time % 60
+
     print("\n" + "="*70)
     print("VISUALIZATION COMPLETE")
+    print("="*70)
+    if minutes > 0:
+        print(f"Total elapsed time: {minutes}m {seconds:.2f}s")
+    else:
+        print(f"Total elapsed time: {seconds:.2f}s")
     print("="*70)
 
 

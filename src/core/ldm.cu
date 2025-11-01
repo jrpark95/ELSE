@@ -319,6 +319,26 @@ void EKIMeteorologicalData::cleanup() {
 GridConfig loadGridConfig() {
     GridConfig config;
 
+    // GRID_CONFIG values are not used in v1.0
+    // Return default values without reading from file
+    // This avoids confusion and unnecessary file parsing
+
+    // Default values (placeholders - not actively used)
+    // These values are kept for compatibility with existing kernels
+    // but have no effect on particle tracking or EKI calculations
+    config.start_lat = 36.0f;
+    config.start_lon = 140.0f;
+    config.end_lat = 37.0f;
+    config.end_lon = 141.0f;
+    config.lat_step = 0.5f;
+    config.lon_step = 0.5f;
+
+    return config;
+
+    // === ORIGINAL CODE DISABLED ===
+    // The following code would read GRID_CONFIG from source.conf
+    // but is disabled as these values are not used in v1.0
+    /*
     // Try modern config file first, fallback to legacy
     std::string source_file_path;
     std::ifstream file;
@@ -416,4 +436,5 @@ GridConfig loadGridConfig() {
     }
 
     return config;
+    */
 }

@@ -58,25 +58,11 @@ def Run(input_config={}, input_data={}):
                 Phi_n = compute_Phi_n(obs, state_in_ob, ob_err)
                 alpha_inv = compute_alpha_inv(len(state_in_ob), Phi_n, alpha_inv_history, i)
                 alpha_inv_history.append(alpha_inv)
-
-                # Check for negative step (invalid)
-                if alpha_inv < 0.0:
-                    print(f"Adaptive EKI converged (negative step) at iteration {i+1}")
+                print(f"alpha_inv: {alpha_inv:.4f}, condition check: {alpha_inv >= 1.0 - T_n}")
+                if len(alpha_inv_history) > 1 and (alpha_inv >= 1.0 - T_n or alpha_inv < 0.0):
                     break
-
-                # Update total step
-                T_n_new = T_n + alpha_inv
-
-                # Only converge if total step significantly exceeds 1.0 (with tolerance)
-                # or if step size becomes very small
-                if T_n_new > 1.05:  # 5% tolerance for numerical issues
-                    print(f"Adaptive EKI converged (T_n={T_n_new:.3f} >= 1.0) at iteration {i+1}")
-                    break
-                elif len(alpha_inv_history) > 2 and alpha_inv < 0.01:  # Step < 1%
-                    print(f"Adaptive EKI converged (small step={alpha_inv:.4f}) at iteration {i+1}")
-                    break
-
-                T_n = T_n_new
+                T_n += alpha_inv
+                print(f"T_n: {T_n:.4f}")
         
             # Now safe to access - we know keys exist
             # IMPORTANT: Pass localizer_func explicitly (no default None allowed)
@@ -97,7 +83,7 @@ def Run(input_config={}, input_data={}):
                 state_update = inverse.REnKF(i, state_predict, state_in_ob, obs, ob_err, ob)
             else:
                 state_update = inverse.EnKF(i, state_predict, state_in_ob, obs, ob_err, ob)
-            
+
             misfits = np.mean(state_update,1) - np.mean(state_predict, 1)
             state_predict = state_update.copy()
             state_update_iteration_list.append(state_update.copy())
@@ -160,6 +146,7 @@ class Inverse(object):
         self.beta = input_config['EnRML_step_length']
         self.lambda_value = input_config['REnKF_lambda']
         self.weighting_factor = input_config['Localization_weighting_factor']
+        self.inflation = input_config.get('EKI_inflation', 1.0)  # Default to 1.0 if not specified
         self.input_config = input_config
         self.time = 0
 
@@ -207,6 +194,14 @@ class Inverse(object):
         k = np.dot(pxz, np.linalg.pinv(pzz+ob_err))
         dx = np.dot(k, obs-state_in_ob)
         state_update = np.array(state_predict) + dx
+
+        # Use inflation from configuration (loaded from eki.conf)
+        if self.inflation != 1.0:
+            mean_state = np.mean(state_update, axis=1, keepdims=True)
+            state_update = mean_state + self.inflation * (state_update - mean_state)
+            if iteration == 1:  # Only log on first iteration
+                print(f"[EnKF] Using inflation factor: {self.inflation:.1f} (from eki.conf)")
+
         return state_update
 
     def Adaptive_EnKF(self, iteration, state_predict, state_in_ob, obs, ob_err, ob, alpha_inv):
@@ -223,15 +218,14 @@ class Inverse(object):
         return state_update
 
     def centralized_localizer(matrix, L):
-        taper1 = np.exp(-np.arange(matrix.shape[0])**2 / (2*L**2))  # (m,)
-        taper2 = np.exp(-np.arange(matrix.shape[1])**2 / (2*L**2))  # (n,)
+        distances1 = compute_distances(matrix.shape[0])
+        distances2 = compute_distances(matrix.shape[1])
 
-        Psi = taper1[:, np.newaxis] * taper2[np.newaxis, :]  # (m, n)
-        Psi = np.where(Psi < 1e-10, 0.0, Psi)
-
-        localized_matrix = matrix * Psi
-        localized_matrix = np.nan_to_num(localized_matrix, nan=0.0, posinf=0.0, neginf=0.0)
-
+        # Compute the localization matrices.
+        Psi1 = np.vectorize(lambda d: np.exp(-d**2 / (2*L**2)))(distances1)
+        Psi2 = np.vectorize(lambda d: np.exp(-d**2 / (2*L**2)))(distances2)
+        # Apply localization on the matrix.
+        localized_matrix = matrix * Psi1 * Psi2
         return localized_matrix
 
     def EnKF_with_Localizer(self, iteration, state_predict, state_in_ob, obs, ob_err, ob,
