@@ -281,10 +281,10 @@ def load_eki_iterations():
     return iterations
 
 def load_true_emissions():
-    """Load true emission profile from eki.conf"""
+    """Load true emission profile from source.conf"""
     emissions = []
     try:
-        with open('input/eki.conf', 'r') as f:
+        with open('input/source.conf', 'r') as f:
             in_section = False
             for line in f:
                 # Support both ':' and '=' separators
@@ -310,11 +310,13 @@ def load_true_emissions():
 def plot_emission_estimates(ax, eki_iterations, true_emissions, num_timesteps, time_interval):
     """Plot emission estimates on given axis"""
 
-    # Plot true emissions
+    # Plot true emissions (excluding last timestep)
     if true_emissions is not None and len(true_emissions) > 0:
-        total_duration_minutes = num_timesteps * time_interval
-        emission_times = np.linspace(0, total_duration_minutes, len(true_emissions))
-        ax.plot(emission_times, true_emissions, 'k-', linewidth=3,
+        # Exclude last timestep
+        true_emissions_plot = true_emissions[:-1]
+        total_duration_minutes = (num_timesteps - 1) * time_interval  # Adjusted for excluded timestep
+        emission_times = np.linspace(0, total_duration_minutes, len(true_emissions_plot))
+        ax.plot(emission_times, true_emissions_plot, 'k-', linewidth=3,
                 label='True Emissions', alpha=0.9)
 
     # Plot EKI iteration estimates if available
@@ -338,10 +340,11 @@ def plot_emission_estimates(ax, eki_iterations, true_emissions, num_timesteps, t
         for color_idx, iter_idx in enumerate(iters_to_show):
             iteration = eki_iterations[iter_idx]
             if len(iteration) > 0 and iteration.ndim == 2:
-                mean_est = iteration.mean(axis=1)
-                std_est = iteration.std(axis=1)
+                # Exclude last timestep
+                mean_est = iteration.mean(axis=1)[:-1]
+                std_est = iteration.std(axis=1)[:-1]
 
-                total_duration_minutes = num_timesteps * time_interval
+                total_duration_minutes = (num_timesteps - 1) * time_interval  # Adjusted for excluded timestep
                 iter_times = np.linspace(0, total_duration_minutes, len(mean_est))
 
                 linestyle = '-' if iter_idx == num_iters - 1 else '--'
@@ -492,13 +495,14 @@ def create_receptor_comparison():
         # ========== ROW 1: PARTICLE COUNTS ==========
         for col, r in enumerate(receptors_on_page):
             ax = fig.add_subplot(gs[0, col])
-            ax.plot(times, single_counts[r], 'o-', color=single_color,
+            # Exclude last timestep (use [:-1] slicing)
+            ax.plot(times[:-1], single_counts[r][:-1], 'o-', color=single_color,
                      linewidth=2, markersize=5, label='Single Mode', alpha=0.9)
-            ax.plot(times, ens_counts_mean[r], 's--', color=ensemble_color,
+            ax.plot(times[:-1], ens_counts_mean[r][:-1], 's--', color=ensemble_color,
                      linewidth=2, markersize=4, label='Ensemble Mean', alpha=0.9)
-            ax.fill_between(times,
-                             ens_counts_mean[r] - ens_counts_std[r],
-                             ens_counts_mean[r] + ens_counts_std[r],
+            ax.fill_between(times[:-1],
+                             ens_counts_mean[r][:-1] - ens_counts_std[r][:-1],
+                             ens_counts_mean[r][:-1] + ens_counts_std[r][:-1],
                              color=ensemble_color, alpha=0.2)
             ax.set_xlabel('Time (minutes)', fontsize=11)
             ax.set_ylabel('Particle Count', fontsize=11)
@@ -509,13 +513,14 @@ def create_receptor_comparison():
         # ========== ROW 2: OBSERVATION DOSES ==========
         for col, r in enumerate(receptors_on_page):
             ax = fig.add_subplot(gs[1, col])
-            ax.plot(times, single_doses[r], 'o-', color=single_color,
+            # Exclude last timestep (use [:-1] slicing)
+            ax.plot(times[:-1], single_doses[r][:-1], 'o-', color=single_color,
                      linewidth=2, markersize=5, label='Single Mode', alpha=0.9)
-            ax.plot(times, ens_dose_mean[r], 's--', color=ensemble_color,
+            ax.plot(times[:-1], ens_dose_mean[r][:-1], 's--', color=ensemble_color,
                      linewidth=2, markersize=4, label='Ensemble Mean', alpha=0.9)
-            ax.fill_between(times,
-                             ens_dose_mean[r] - ens_dose_std[r],
-                             ens_dose_mean[r] + ens_dose_std[r],
+            ax.fill_between(times[:-1],
+                             ens_dose_mean[r][:-1] - ens_dose_std[r][:-1],
+                             ens_dose_mean[r][:-1] + ens_dose_std[r][:-1],
                              color=ensemble_color, alpha=0.2)
             ax.set_xlabel('Time (minutes)', fontsize=11)
             ax.set_ylabel('Dose (Sv)', fontsize=11)

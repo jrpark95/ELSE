@@ -475,15 +475,15 @@ void LDM::loadEKISettings() {
     // Initialize global EKI configuration - NO DEFAULTS, all values must be in config file
     g_eki.mode = true;  // EKI mode is enabled by calling this function
 
-    // Clear emission vectors
-    g_eki.true_emissions.clear();
-    g_eki.prior_emissions.clear();
+    // NOTE: Emission configuration (TRUE_EMISSION_SERIES, PRIOR_EMISSION_MODE,
+    //       PRIOR_EMISSION_CONSTANT) is now parsed in loadSourceConfig() from source.conf
+    //       Do NOT initialize emission-related fields here - they are set by loadSourceConfig()
 
     // Initialize to sentinel values to detect missing parameters
     g_eki.time_interval = -1.0f;          // Must be set by config
     g_eki.time_unit = "";                 // Must be set by config
-    g_eki.prior_mode = "";                // Must be set by config
-    g_eki.prior_constant = -1.0f;         // Must be set by config (if prior_mode = constant)
+    // g_eki.prior_mode = "";             // Now set in loadSourceConfig()
+    // g_eki.prior_constant = -1.0f;      // Now set in loadSourceConfig()
     g_eki.ensemble_size = -1;             // Must be set by config
     g_eki.noise_level = -1.0f;            // Must be set by config
     g_eki.iteration = -1;                 // Must be set by config
@@ -492,10 +492,6 @@ void LDM::loadEKISettings() {
     g_eki.localized_eki = "";             // Must be set by config
     g_eki.regularization = "";            // Must be set by config
     g_eki.renkf_lambda = -1.0f;           // Must be set by config (if regularization = on)
-
-    // State machine flags for multi-line section parsing
-    bool reading_true_emissions = false;
-    bool reading_prior_emissions = false;
     
     while (fgets(buffer, sizeof(buffer), ekiFile)) {
         // Skip comments and empty lines
@@ -510,40 +506,17 @@ void LDM::loadEKISettings() {
             *colon_pos = '=';
         }
 
-        // State machine: Check for multi-line section headers
-        if (strstr(buffer, "TRUE_EMISSION_SERIES=")) {
-            reading_true_emissions = true;
-            reading_prior_emissions = false;
-            continue;
+        // NOTE: Emission parsing (TRUE_EMISSION_SERIES, PRIOR_EMISSION_MODE, etc.)
+        //       has been moved to loadSourceConfig() and is now read from source.conf
+        //       Skip any emission-related lines in eki.conf for backward compatibility
+        if (strstr(buffer, "TRUE_EMISSION_SERIES") ||
+            strstr(buffer, "PRIOR_EMISSION_SERIES") ||
+            strstr(buffer, "PRIOR_EMISSION_MODE") ||
+            strstr(buffer, "PRIOR_EMISSION_CONSTANT")) {
+            continue;  // Ignore these lines - they're now in source.conf
         }
 
-        if (strstr(buffer, "PRIOR_EMISSION_SERIES=")) {
-            reading_true_emissions = false;
-            reading_prior_emissions = true;
-            continue;
-        }
-
-        // Reset section flags when encountering key-value pairs
-        if (strchr(buffer, '=') != nullptr) {
-            reading_true_emissions = false;
-            reading_prior_emissions = false;
-        }
-
-        // Parse matrix data based on current state
-        if (reading_true_emissions) {
-            float emission;
-            if (sscanf(buffer, "%f", &emission) == 1) {
-                g_eki.true_emissions.push_back(emission);
-            }
-        }
-        else if (reading_prior_emissions) {
-            float emission;
-            if (sscanf(buffer, "%f", &emission) == 1) {
-                g_eki.prior_emissions.push_back(emission);
-            }
-        }
-        
-        // Parse key-value pairs (section flags already reset above)
+        // Parse key-value pairs
         if (strchr(buffer, '=') != nullptr) {
 
             // Temporal parameters
@@ -554,16 +527,6 @@ void LDM::loadEKISettings() {
                 char unit[32];
                 sscanf(buffer, "EKI_TIME_UNIT=%s", unit);
                 g_eki.time_unit = std::string(unit);
-            }
-
-            // Prior emission settings
-            else if (strstr(buffer, "PRIOR_EMISSION_MODE=")) {
-                char mode[32];
-                sscanf(buffer, "PRIOR_EMISSION_MODE=%s", mode);
-                g_eki.prior_mode = std::string(mode);
-            }
-            else if (strstr(buffer, "PRIOR_EMISSION_CONSTANT=")) {
-                sscanf(buffer, "PRIOR_EMISSION_CONSTANT=%f", &g_eki.prior_constant);
             }
 
             // EKI algorithm parameters
@@ -641,6 +604,7 @@ void LDM::loadEKISettings() {
     }
 
     // ===== VALIDATION: PRIOR_EMISSION_MODE (must be set) =====
+    // NOTE: This is now parsed from source.conf, not eki.conf
     if (g_eki.prior_mode.empty()) {
         std::cerr << std::endl << Color::RED << Color::BOLD << "[INPUT ERROR] "
                   << Color::RESET << "Missing required parameter: PRIOR_EMISSION_MODE" << std::endl;
@@ -649,21 +613,22 @@ void LDM::loadEKISettings() {
         std::cerr << "    Prior emission mode must be specified for EKI." << std::endl;
         std::cerr << std::endl;
         std::cerr << "  " << Color::CYAN << "Required value:" << Color::RESET << std::endl;
-        std::cerr << "    PRIOR_EMISSION_MODE: <string>" << std::endl;
+        std::cerr << "    PRIOR_EMISSION_MODE= <string>" << std::endl;
         std::cerr << std::endl;
         std::cerr << "  " << Color::GREEN << "Valid values:" << Color::RESET << std::endl;
         std::cerr << "    - \"constant\" (single value for all timesteps)" << std::endl;
         std::cerr << "    - \"series\" (use PRIOR_EMISSION_SERIES)" << std::endl;
         std::cerr << std::endl;
         std::cerr << "  " << Color::GREEN << "Example:" << Color::RESET << std::endl;
-        std::cerr << "    PRIOR_EMISSION_MODE: constant" << std::endl;
+        std::cerr << "    PRIOR_EMISSION_MODE= constant" << std::endl;
         std::cerr << std::endl;
-        std::cerr << "  " << Color::CYAN << "Fix in:" << Color::RESET << " " << config_filename << std::endl;
+        std::cerr << "  " << Color::CYAN << "Fix in:" << Color::RESET << " input/source.conf" << std::endl;
         std::cerr << std::endl;
         exit(1);
     }
 
     // ===== VALIDATION: PRIOR_EMISSION_CONSTANT (if mode = constant) =====
+    // NOTE: This is now parsed from source.conf, not eki.conf
     if (g_eki.prior_mode == "constant" && g_eki.prior_constant < 0.0f) {
         std::cerr << std::endl << Color::RED << Color::BOLD << "[INPUT ERROR] "
                   << Color::RESET << "Missing required parameter: PRIOR_EMISSION_CONSTANT" << std::endl;
@@ -673,7 +638,7 @@ void LDM::loadEKISettings() {
         std::cerr << "    PRIOR_EMISSION_CONSTANT is not specified." << std::endl;
         std::cerr << std::endl;
         std::cerr << "  " << Color::CYAN << "Required value:" << Color::RESET << std::endl;
-        std::cerr << "    PRIOR_EMISSION_CONSTANT: <positive number> (Bq/s)" << std::endl;
+        std::cerr << "    PRIOR_EMISSION_CONSTANT= <positive number> (Bq/s)" << std::endl;
         std::cerr << std::endl;
         std::cerr << "  " << Color::GREEN << "Typical values:" << Color::RESET << std::endl;
         std::cerr << "    - Small source:  1.0e+8 Bq/s" << std::endl;
@@ -681,9 +646,9 @@ void LDM::loadEKISettings() {
         std::cerr << "    - Large source:  1.0e+12 Bq/s" << std::endl;
         std::cerr << std::endl;
         std::cerr << "  " << Color::GREEN << "Example:" << Color::RESET << std::endl;
-        std::cerr << "    PRIOR_EMISSION_CONSTANT: 1.5e+8" << std::endl;
+        std::cerr << "    PRIOR_EMISSION_CONSTANT= 1.5e+8" << std::endl;
         std::cerr << std::endl;
-        std::cerr << "  " << Color::CYAN << "Fix in:" << Color::RESET << " " << config_filename << std::endl;
+        std::cerr << "  " << Color::CYAN << "Fix in:" << Color::RESET << " input/source.conf" << std::endl;
         std::cerr << std::endl;
         exit(1);
     }
@@ -930,6 +895,7 @@ void LDM::loadEKISettings() {
     }
 
     // ===== VALIDATION: TRUE_EMISSION_SERIES =====
+    // NOTE: This is now parsed from source.conf, not eki.conf
     if (g_eki.true_emissions.empty()) {
         std::cerr << std::endl << Color::RED << Color::BOLD << "[INPUT ERROR] "
                   << Color::RESET << "No TRUE_EMISSION_SERIES data found" << std::endl;
@@ -947,7 +913,7 @@ void LDM::loadEKISettings() {
         std::cerr << "    1.0e+12" << std::endl;
         std::cerr << "    5.0e+11" << std::endl;
         std::cerr << std::endl;
-        std::cerr << "  " << Color::CYAN << "Fix in:" << Color::RESET << " " << config_filename << std::endl;
+        std::cerr << "  " << Color::CYAN << "Fix in:" << Color::RESET << " input/source.conf" << std::endl;
         std::cerr << std::endl;
         exit(1);
     }
@@ -963,7 +929,7 @@ void LDM::loadEKISettings() {
             std::cerr << "    Emission rates cannot be negative." << std::endl;
             std::cerr << std::endl;
             std::cerr << "  " << Color::CYAN << "Fix in:" << Color::RESET
-                      << " " << config_filename << ", TRUE_EMISSION_SERIES" << std::endl;
+                      << " input/source.conf, TRUE_EMISSION_SERIES" << std::endl;
             std::cerr << std::endl;
             exit(1);
         }
@@ -980,7 +946,7 @@ void LDM::loadEKISettings() {
             std::cerr << "    Fukushima accident peak: ~1e+15 - 1e+17 Bq/hour" << std::endl;
             std::cerr << std::endl;
             std::cerr << "  " << Color::CYAN << "Fix in:" << Color::RESET
-                      << " " << config_filename << ", TRUE_EMISSION_SERIES" << std::endl;
+                      << " input/source.conf, TRUE_EMISSION_SERIES" << std::endl;
             std::cerr << std::endl;
             exit(1);
         }
@@ -1997,15 +1963,18 @@ void LDM::loadSourceConfig() {
         }
         if (is_empty) continue;
 
-        // Stop parsing when encountering a section header (e.g., [GRID_CONFIG])
-        // Source locations are defined before any section headers
-        if (buffer[0] == '[') {
+        // Stop parsing source locations when encountering:
+        // 1. Section headers starting with '[' (e.g., [GRID_CONFIG])
+        // 2. Configuration key-value pairs containing '=' or ':'
+        //    (e.g., TRUE_EMISSION_SERIES=, PRIOR_EMISSION_MODE=)
+        // Source locations are defined before any of these
+        if (buffer[0] == '[' || strchr(buffer, '=') || strchr(buffer, ':')) {
             break;
         }
 
-        // Parse source location: LON LAT HEIGHT
+        // Parse source location: LAT LON HEIGHT
         Source src;
-        int parsed = sscanf(buffer, "%f %f %f", &src.lon, &src.lat, &src.height);
+        int parsed = sscanf(buffer, "%f %f %f", &src.lat, &src.lon, &src.height);
 
         if (parsed != 3) {
             fclose(sourceFile);
@@ -2017,11 +1986,11 @@ void LDM::loadSourceConfig() {
             std::cerr << "    " << buffer;
             std::cerr << std::endl;
             std::cerr << "  " << Color::CYAN << "Required format:" << Color::RESET << std::endl;
-            std::cerr << "    LONGITUDE LATITUDE HEIGHT" << std::endl;
+            std::cerr << "    LATITUDE LONGITUDE HEIGHT" << std::endl;
             std::cerr << "    (space-separated, degrees and meters)" << std::endl;
             std::cerr << std::endl;
             std::cerr << "  " << Color::GREEN << "Example:" << Color::RESET << std::endl;
-            std::cerr << "    129.48 35.71 100.0" << std::endl;
+            std::cerr << "    35.71 129.48 100.0" << std::endl;
             std::cerr << std::endl;
             std::cerr << "  " << Color::CYAN << "Fix in:" << Color::RESET << " input/source.conf" << std::endl;
             std::cerr << std::endl;
@@ -2127,6 +2096,109 @@ void LDM::loadSourceConfig() {
         h_sources.push_back(src);
     }
 
+    // ========================================================================
+    // Phase 2: Parse emission time series configuration
+    // ========================================================================
+    // Continue reading the same file to parse TRUE_EMISSION_SERIES and
+    // PRIOR_EMISSION settings (moved from eki.conf to source.conf)
+
+    bool reading_true_emissions = false;
+    bool reading_prior_emissions = false;
+
+    // Initialize emission config with default values
+    g_eki.true_emissions.clear();
+    g_eki.prior_mode = "";
+    g_eki.prior_constant = -1.0f;
+
+    // Check if buffer from Phase 1 contains an emission trigger
+    // (Phase 1 breaks when it encounters these lines, leaving them in buffer)
+    if (strstr(buffer, "TRUE_EMISSION_SERIES=")) {
+        reading_true_emissions = true;
+    } else if (strstr(buffer, "PRIOR_EMISSION_SERIES=")) {
+        reading_prior_emissions = true;
+    } else if (strstr(buffer, "PRIOR_EMISSION_MODE=") || strstr(buffer, "PRIOR_EMISSION_MODE:")) {
+        char mode[32];
+        if (sscanf(buffer, "PRIOR_EMISSION_MODE=%s", mode) == 1 ||
+            sscanf(buffer, "PRIOR_EMISSION_MODE: %s", mode) == 1) {
+            g_eki.prior_mode = std::string(mode);
+        }
+    } else if (strstr(buffer, "PRIOR_EMISSION_CONSTANT=") || strstr(buffer, "PRIOR_EMISSION_CONSTANT:")) {
+        if (sscanf(buffer, "PRIOR_EMISSION_CONSTANT=%f", &g_eki.prior_constant) != 1) {
+            sscanf(buffer, "PRIOR_EMISSION_CONSTANT: %f", &g_eki.prior_constant);
+        }
+    }
+
+    while (fgets(buffer, sizeof(buffer), sourceFile)) {
+        line_number++;
+
+        // Skip comments and empty lines
+        if (buffer[0] == '#') continue;
+
+        bool is_empty = true;
+        for (int i = 0; buffer[i] != '\0'; i++) {
+            if (buffer[i] != ' ' && buffer[i] != '\t' &&
+                buffer[i] != '\n' && buffer[i] != '\r') {
+                is_empty = false;
+                break;
+            }
+        }
+        if (is_empty) continue;
+
+        // State machine: Check for multi-line section headers
+        if (strstr(buffer, "TRUE_EMISSION_SERIES=")) {
+            reading_true_emissions = true;
+            reading_prior_emissions = false;
+            continue;
+        }
+
+        if (strstr(buffer, "PRIOR_EMISSION_SERIES=")) {
+            reading_true_emissions = false;
+            reading_prior_emissions = true;
+            continue;
+        }
+
+        // Check for key-value pairs and reset reading states
+        // This must come BEFORE the emission data reading checks
+        if (strchr(buffer, '=') || strchr(buffer, ':')) {
+            // This line contains a config parameter, not emission data
+            reading_true_emissions = false;
+            reading_prior_emissions = false;
+
+            // Prior emission settings
+            if (strstr(buffer, "PRIOR_EMISSION_MODE=") || strstr(buffer, "PRIOR_EMISSION_MODE:")) {
+                char mode[32];
+                if (sscanf(buffer, "PRIOR_EMISSION_MODE=%s", mode) == 1 ||
+                    sscanf(buffer, "PRIOR_EMISSION_MODE: %s", mode) == 1) {
+                    g_eki.prior_mode = std::string(mode);
+                }
+            }
+            else if (strstr(buffer, "PRIOR_EMISSION_CONSTANT=") || strstr(buffer, "PRIOR_EMISSION_CONSTANT:")) {
+                if (sscanf(buffer, "PRIOR_EMISSION_CONSTANT=%f", &g_eki.prior_constant) != 1) {
+                    sscanf(buffer, "PRIOR_EMISSION_CONSTANT: %f", &g_eki.prior_constant);
+                }
+            }
+            continue;  // Move to next line after processing key-value pair
+        }
+
+        // Reading emission data lines (multi-line state)
+        // These checks come AFTER key-value pair detection
+        if (reading_true_emissions) {
+            float emission;
+            if (sscanf(buffer, "%f", &emission) == 1) {
+                g_eki.true_emissions.push_back(emission);
+            }
+            continue;
+        }
+
+        if (reading_prior_emissions) {
+            float emission;
+            if (sscanf(buffer, "%f", &emission) == 1) {
+                g_eki.prior_emissions.push_back(emission);
+            }
+            continue;
+        }
+    }
+
     fclose(sourceFile);
 
     // Validation: at least one source must be defined
@@ -2139,11 +2211,11 @@ void LDM::loadSourceConfig() {
         std::cerr << std::endl;
         std::cerr << "  " << Color::CYAN << "Solution:" << Color::RESET << std::endl;
         std::cerr << "    Add at least one source line in the format:" << std::endl;
-        std::cerr << "    LONGITUDE LATITUDE HEIGHT" << std::endl;
+        std::cerr << "    LATITUDE LONGITUDE HEIGHT" << std::endl;
         std::cerr << std::endl;
         std::cerr << "  " << Color::GREEN << "Example:" << Color::RESET << std::endl;
         std::cerr << "    # Fukushima Daiichi Nuclear Power Plant" << std::endl;
-        std::cerr << "    141.0 37.0 20.0" << std::endl;
+        std::cerr << "    37.0 141.0 20.0" << std::endl;
         std::cerr << std::endl;
         std::cerr << "  " << Color::CYAN << "Fix in:" << Color::RESET << " input/source.conf" << std::endl;
         std::cerr << std::endl;
@@ -2408,6 +2480,19 @@ void LDM::loadNuclidesConfig() {
  * @date 2025
  *****************************************************************************/
 void LDM::loadAdvancedConfig() {
+    // ADVANCED.CONF NOT REQUIRED IN v1.0
+    // All values are hardcoded - file can be deleted
+    // The file is not read or checked for existence
+
+    std::cout << Color::BOLD << "Advanced Configuration" << Color::RESET << std::endl;
+    std::cout << "  Status: " << Color::GREEN << "Using hardcoded defaults" << Color::RESET << std::endl;
+    std::cout << "  File required: " << Color::YELLOW << "No (advanced.conf can be deleted)" << Color::RESET << std::endl;
+    std::cout << "  Data paths: " << (isGFS ? "GFS" : "LDAPS") << std::endl;
+    std::cout << "  Grid dimensions: " << Color::GREEN << "validated (compile-time constants)" << Color::RESET << std::endl;
+
+    // === ORIGINAL CODE DISABLED ===
+    // The following code would read advanced.conf but is disabled in v1.0
+    /*
     ConfigReader adv_config;
 
     if (!adv_config.loadConfig("input/advanced.conf")) {
@@ -2447,4 +2532,5 @@ void LDM::loadAdvancedConfig() {
                   << "Config dimensions differ from code constants" << std::endl;
         std::cout << "  Code will use Constants namespace values (compile-time)" << std::endl;
     }
+    */
 }

@@ -100,6 +100,10 @@ int main(int argc, char** argv) {
     // ===========================================================================
     // System Initialization
     // ===========================================================================
+
+    // Start total simulation timer
+    auto simulation_start_time = std::chrono::high_resolution_clock::now();
+
     std::cout << "\n" << Color::BOLD << Color::CYAN
               << "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
               << "  LDM-EKI: Source Term Inversion with Ensemble Kalman Methods\n"
@@ -1000,6 +1004,40 @@ int main(int argc, char** argv) {
     std::cout << "  This creates animated GIF from VTK particle data" << std::endl;
     std::cout << "  Output: " << Color::BOLD << "output/results/particle_distribution_{prior|ensemble}.gif"
               << Color::RESET << "\n" << std::endl;
+
+    // ========================================================================
+    // Total Simulation Time
+    // ========================================================================
+    auto simulation_end_time = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+        simulation_end_time - simulation_start_time
+    );
+
+    double total_seconds = duration.count() / 1000.0;
+    int hours = static_cast<int>(total_seconds / 3600);
+    int minutes = static_cast<int>((total_seconds - hours * 3600) / 60);
+    double seconds = total_seconds - hours * 3600 - minutes * 60;
+
+    std::cout << Color::BOLD << Color::CYAN
+              << "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+              << Color::RESET;
+    std::cout << Color::GREEN << "✓ " << Color::RESET
+              << Color::BOLD << "Simulation completed successfully" << Color::RESET << std::endl;
+    std::cout << Color::CYAN << "  Total elapsed time: " << Color::RESET
+              << Color::BOLD;
+
+    if (hours > 0) {
+        std::cout << hours << "h " << minutes << "m " << std::fixed << std::setprecision(2) << seconds << "s";
+    } else if (minutes > 0) {
+        std::cout << minutes << "m " << std::fixed << std::setprecision(2) << seconds << "s";
+    } else {
+        std::cout << std::fixed << std::setprecision(2) << total_seconds << "s";
+    }
+
+    std::cout << Color::RESET << std::endl;
+    std::cout << Color::BOLD << Color::CYAN
+              << "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+              << Color::RESET << std::endl;
 
     return 0;
 }
